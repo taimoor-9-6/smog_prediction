@@ -1,0 +1,804 @@
+### Project ###
+install.packages("caret")
+install.packages("Metrics")
+install.packages("nnet")
+install.packages("ROSE")
+install.packages("smotefamily")
+install.packages('Matrix')
+install.packages("pROC")
+install.packages("gridExtra")
+install.packages("ggnewscale")
+install.packages("paletteer")
+install.packages("RColorBrewer")
+install.packages("dplyr")
+
+library(paletteer)
+library(ggnewscale)  
+library(ggplot2)
+library(caret)
+library(Metrics)
+library(nnet)
+library(stats)
+library(smotefamily)
+library(corrplot)
+library(tidyr)
+library(Matrix)
+library(car)
+library(pROC)
+library(gridExtra)
+library(MASS)
+library(paletteer)
+library(RColorBrewer)
+library ( pROC )
+library(broom)
+library(dplyr)
+
+
+
+# Read dataset
+df<-read.csv('Data/MY2022 Fuel Consumption Ratings.csv')
+data=df
+
+#### Reseaerch Question ####
+# Predict which company has the highest and lowest amount of co2 emission and smog influence per vehicle type
+
+### ----------------------------------- ###
+
+#### Stage 1: Data Preparation ####
+
+#### Inspect the dataset ####
+str(df)
+summary(df)
+# Get the class of each column
+sapply(df, class)
+paste("The number of observations in this data are: ", nrow(df))
+# Since our observations are greater than 500, we will trim the number of observations based on how imbalanced our dataset is
+
+#### Remove columns ####
+df <- df[, -which(names(df) == "Model.Year")] # We do not need the model year as all the models are from 2022
+df <- df[, -which(names(df) == "Model")] # Do not need the model as our analysis is assess vehicle types and companies
+df <- df[, -which(names(df) == "CO2.Rating")] # We do not need CO2 rating as our target varaible through classification is Smog Rating
+df <- df[, -which(names(df) == "Fuel.Consumption..City..L.100.km.")] # We do not need this column as we will be using the city and higway combined column. Reason? Our focus is not on figuring out the difference in fuel consumption between city and highway
+df <- df[, -which(names(df) == "Fuel.Consumption.Hwy..L.100.km..")]  # We do not need this column as we will be using the city and higway combined column. Reason? Our focus is not on figuring out the difference in fuel consumption between city and highway
+df <- df[, -which(names(df) == "Fuel.Consumption.Comb..mpg..")] # Since we are sing fuel consumption combined in litres per 100 km, we do not need miles per gallon, as it providing the same information in a different scale
+
+
+#### Check for NaN values ####
+missing_values <- colSums(is.na(df))
+columns_with_missing <- names(missing_values)[missing_values > 0]
+if (length(columns_with_missing) > 0) {
+  cat("Columns with missing values:", columns_with_missing, "\n")
+  # Remove columns with missing values
+  data <- data[, !(names(data) %in% columns_with_missing)]
+} else {
+  cat("No columns with missing values.\n")
+}
+
+#### Checking how balanced are the company make and vehicle type ####
+# Group by Make and Vehicle.Class, and summarize as total count
+df_summary <- df %>%
+  group_by(Vehicle.Class, Make) %>%
+  summarise(Total_Count = n())
+# Plotting a bar graph to represent our grouped data
+# Create the scatter plot
+ggplot(df_summary, aes(x = Vehicle.Class, y = Total_Count, color = Make)) +
+  geom_point() +
+  # scale_color_brewer(palette = "Set1") +
+  labs(x = "Vehicle Type", y = "Count", color = "Make") +
+  theme_minimal()
+
+# Calculate quartiles (Q1 and Q3) of Total_Count column in df_summary
+q1 <- quantile(df_summary$Total_Count, 0.25)
+q2 <- quantile(df_summary$Total_Count, 0.5)
+q3 <- quantile(df_summary$Total_Count, 0.75)
+# Print the quantile values
+cat("Q1 (25th Percentile):", q1, "\n")
+cat("Q2 (50th Percentile):", q2, "\n")
+cat("Q3 (75th Percentile):", round(q3), "\n")
+IQR <- q3 - q1
+cat("IQR:", IQR, "\n")
+# Define range for outliers (e.g., 1.5 times IQR)
+lower_bound <- q1 - 1.5 * IQR
+upper_bound <- q3 + 1.5 * IQR
+cat("Lower Bound:", lower_bound, "\n")
+cat("Upper Bound:", upper_bound, "\n")
+# Create box plot with outliers
+ggplot(df_summary, aes(x = "", y = Total_Count)) +
+  geom_boxplot(fill = "lightblue", color = "black", outlier.shape = 1, outlier.size = 3) +
+  labs(x = "Make & Vehicle Class", y = "Total Count") +
+  ggtitle("Distribution of Total Count by Make & Vehicle Class") +
+  theme_minimal() +
+  theme(axis.text.x = element_blank(), 
+        axis.ticks.x = element_blank(),
+        text = element_text(size = 8))
+# Since we have to find the average of each company per vehicle type, we will remove the values below q2 as they will have less of significance when calculating the average
+# Similarly, vehicle tpyes per company make that have samples above the q3 (75th) percentile will be removed. As per the analysis, samples till the q3 amount will be sufficient enough to make a conclusive average
+# Differentiating data points that fall in the lower or upper category bound
+df_lower <- df_summary[df_summary$Total_Count < q2, ]
+df_upper<-  df_summary[df_summary$Total_Count > round(q3), ]
+
+# Function to remove rows based on df_lower and df_upper
+remove_rows <- function(df, df_lower, df_upper,q2,q3) {
+  # Remove the excessive values from df_upper
+  q3<-round(q3)
+  for (i in 1:nrow(df_upper)){
+    vehicle_type<-df_upper$Vehicle.Class[i]
+    make<-df_upper$Make[i]
+    count<-df_upper$Total_Count[i]
+    excess<-count-q3
+    rows_to_remove <- sample(which(df$Vehicle.Class == vehicle_type & df$Make == make), excess)
+    df <- df[-rows_to_remove, ]
+  }
+  # Remove the lower bound
+  unique_groups<-unique(df_lower[,c('Vehicle.Class','Make')])
+  for (i in 1:nrow(unique_groups)){
+    vehicle_type<-unique_groups$Vehicle.Class[i]
+    make<-unique_groups$Make[i]
+    df<-df[!(df$Vehicle.Class == vehicle_type & df$Make == make), ]
+  }
+  return (df)
+}
+# Call the function with example data
+df_filtered <- remove_rows(df, df_lower, df_upper,q2,q3)
+# Check Again using group by to see if the function is performed correctly
+# Group by Make and Vehicle.Class, and summarize as total count
+df_summary <- df_filtered %>%
+  group_by(Vehicle.Class, Make) %>%
+  summarise(Total_Count = n())
+# Create the scatter plot to represent updated result
+ggplot(df_summary, aes(x = Vehicle.Class, y = Total_Count, color = Make)) +
+  geom_point() +
+  # scale_color_brewer(palette = "Set1") +
+  labs(x = "Vehicle Type", y = "Count", color = "Make") +
+  theme_minimal()
+df<-df_filtered
+
+
+#### Data Transformation ####
+
+#### Categorical ####
+
+## Transmission ##
+# Histogram for transmission types
+ggplot(data = df, aes(x = Transmission)) +
+  geom_bar(fill = "steelblue", color = "black") +
+  labs(title = "Frequency of Transmission",
+       x = "Transmission Type",
+       y = "Frequency") + 
+  theme_minimal()
+model<-lm(CO2.Emissions.g.km. ~ Transmission, data = df)
+summary(model)
+# Removing 50 rows that have AS8 transmission
+as8_rows <- which(df$Transmission == "AS8")
+rows_to_remove <- sample(as8_rows, 60)
+df <- df[-rows_to_remove,]
+# As the Transmission column is made up of transmission type and the number of gears, we will split the column into two seperate column to reduce the factors of our categorical column and define an ordinal relationship between our gears
+# First we will split the transmission column into transmission tpye and gear, this will help reduce the unique values per columm, which will allow us to seperately assess the significance of transmission type and gear
+transmission_split <- strsplit(df$Transmission, "(?<=\\D)(?=\\d)", perl = TRUE)
+# Extract the transmission type and gear into separate columns
+df$Transmission <- sapply(transmission_split, function(x) {ifelse(length(x) > 0, x[1], NA)})
+df$Gear <- sapply(transmission_split, function(x) {ifelse(length(x) > 1, as.integer(x[2]), NA)})
+# Replace NA values with 0
+df$Gear[is.na(df$Gear)] <- 0
+# df$Gear<-as.factor(df$Gear)
+cat("Unique transmission types are",unique(df$Transmission) , "with their frequencies are:", table(df$Transmission), "\n")
+cat("Unique transmission vales are:", unique(df$Transmission), "\n")
+# Now we will check the distribution of transmission types and gears
+
+## Transmission ##
+# Histogram for transmission types
+ggplot(data = df, aes(x = Transmission)) +
+  geom_bar(fill = "steelblue", color = "black") +
+  labs(title = "Frequency of Transmission Type",
+       x = "Transmission Type",
+       y = "Frequency") + 
+  theme_minimal()
+table(df$Transmission)
+# Check the significant of each transmission type on our regression variable #
+# We will performone-way ANOVA test
+# Factorizing our transmission column
+df$Transmission<-as.factor(df$Transmission)
+model <- lm(CO2.Emissions.g.km. ~ Transmission, data = df)
+summary(model)
+# 5 Step analysis #
+# Step 1: Define the null and alternate hypotheses and alpha
+#Null hypothesis (H0): There is no significant difference in CO2 emission between different types of transmission
+#Alternative hypothesis (Ha): There is a significant difference in CO2 emission between at least two types of transmission
+# Step 2: Define the test
+# Selecting f-test
+# Step 3: State the decision rule
+#Compare the p-value obtained from the F-test to the chosen significance level (alpha)
+# Step 4: compute the test-statistic
+summary(model)
+# Step 5: Conclusion
+# Since each transmission type has a significant effect on our regression, we fail to reject the hypotheses and therefore cannot remove or trim values 
+
+### Gears ###
+# Histogram for gears
+ggplot(data = df, aes(x = Gear)) +
+  geom_bar(fill = "steelblue", color = "black") +
+  labs(title = "Frequency of Gears",
+       x = "Transmission Gears",
+       y = "Frequency") +
+  theme_minimal()
+# We will remove gear 1 and gear 5 as a result of low frequency.
+df <- df[!(df$Gear == 1 | df$Gear == 5), ]
+# We will perform the same 5 step analysis to see the impact of gears on our co2 emission #
+# We will not be performing the step by step analysis, instead we will directly compare the p-value with our alpha = 0.05
+df$Gear<-as.factor(df$Gear)
+model <- lm(CO2.Emissions.g.km. ~ Gear, data = df)
+summary(model)
+
+## Cylinders ##
+# Factorizing the cylinder column 
+df$Cylinders<-as.factor(df$Cylinders)
+ggplot(data = df, aes(x = Cylinders)) +
+  geom_bar(fill = "steelblue", color = "black") +
+  labs(title = "Frequency of Cylinders",
+       x = "Cylinders",
+       y = "Frequency")+ 
+  theme_minimal()
+
+# Remove values with low frequency
+df <- df[(df$Cylinders == 4 | df$Cylinders == 6 | df$Cylinders == 8), ]
+# We will not be performing the step by step analysis, instead we will directly compare the p-value with our alpha = 0.05
+model<-lm(CO2.Emissions.g.km. ~ Cylinders, data = df)
+summary(model)
+table(df$Cylinders)
+# Since each number of cylinder has a significant effect on our regression, we fail to reject the hypotheses and therefore cannot remove or trim values 
+
+## Fuel Type ##
+df$Fuel.Type<-as.factor(df$Fuel.Type)
+ggplot(data = df, aes(x = Fuel.Type)) +
+  geom_bar(fill = "steelblue", color = "black") +
+  labs(title = "Frequency of Fuel Type",
+       x = "Fuel Type",
+       y = "Frequency") +
+  theme_minimal()
+# Since there is a huge imbalance between the four classes, we will remove D and E from the dataset
+df <- df[df$Fuel.Type != 'D', ]
+df <- df[df$Fuel.Type != 'E', ]
+df$Fuel.Type<-as.factor(df$Fuel.Type)
+model<-lm(CO2.Emissions.g.km. ~ Fuel.Type, data = df)
+summary(model)
+table(df$Cylinders)
+df$Fuel.Type<-droplevels(df$Fuel.Type)
+
+## Smog Rating ##
+# We will finally check the distribution of our classification label ##
+df$Smog.Rating<-as.factor(df$Smog.Rating)
+ggplot(data = df, aes(x = Smog.Rating)) +
+  geom_bar(fill = "steelblue", color = "black") +
+  labs(title = "Frequency of Smog Rating",
+       x = "Smog Rating",
+       y = "Frequency") +
+  theme_light()
+# We chose not to remove values from smog rating that have a higher frequency as our dataset is less than 500 observations now, if the results are biased or impacted, we will return here and trim the values
+
+## Make ##
+# We lastly want to see the distribution of Make column # 
+ggplot(data = df, aes(x = Make)) +
+  geom_bar(fill = "steelblue", color = "black") +
+  labs(title = "Frequency of Categorical Column",
+       x = "Make",
+       y = "Frequency")
+# None of the observed companies have a significant lower frequency #
+
+### Converting categorical to factors ###
+df$Cylinders<-as.factor(df$Cylinders)
+df$Gear<-as.factor(df$Gear)
+df$Smog.Rating<-as.factor(df$Smog.Rating)
+
+#### Continuous ####
+# We will now check the distribution of our continuous variables #
+
+## Engine Size ##
+# #Calculate IQR for engine_size column
+engine_size_iqr <- IQR(df$Engine.Size.L.)
+# Print IQR value
+cat("Interquartile Range (IQR) for engine_size column:", engine_size_iqr, "\n")
+# Create boxplot
+ggplot(data = df, aes(y = Engine.Size.L.)) +
+  geom_boxplot(fill = "lightblue", color = "blue") +
+  xlab("Engine Size") +
+  ylab("Size (Liters)") +
+  ggtitle("Boxplot of Engine Size") + 
+  theme_light()
+#Creatae distribution
+ggplot(data = df, aes(x = Engine.Size.L.)) +
+  geom_density(color = "blue", fill = "lightblue") +
+  stat_function(fun = dnorm, args = list(mean = mean(df$Engine.Size.L.), sd = sd(df$Engine.Size.L.)), color = "red", size = 1.2) +
+  xlab("Engine Size") +
+  ylab("Density") +
+  theme_light() +
+  ggtitle("Normal Distribution of Engine Size")
+
+# We will calcualte the ranges now
+df_temp<-df[df['Engine.Size.L.']>6,]
+# Although the dataset is right skewed, will not remove outliers as they represent the behaviors of a real world scenario, and our model should be trained enough to handle such scenarios
+
+## Fuel Consumption Combination, Litre per 100 km ##
+fuel_city_iqr <- IQR(df$Fuel.Consumption.Comb..L.100.km..)
+# Print IQR value
+cat("Interquartile Range (IQR) for fuel consumption in city column:", fuel_city_iqr, "\n")
+ggplot(data=df, aes(x=Fuel.Consumption.Comb..L.100.km..)) +
+  stat_function(fun=dnorm, args=list(mean=mean(df$Fuel.Consumption.Comb..L.100.km..), sd=sd(df$Fuel.Consumption.Comb..L.100.km..)), color="red", size=1.2) +
+  geom_density(color="blue", fill="lightblue") +
+  xlab("Fiel Consumption per L/100KM Size") +
+  ylab("Density") +
+  theme_light()+
+  ggtitle("Normal Distribution of Fuel Consumption, Litre per 100 km")
+# Calculate the effect of fuel consumption on co2 emission
+model<-lm(CO2.Emissions.g.km.~ Fuel.Consumption.Comb..L.100.km.., data=df)
+summary(model)
+# Although the dataset is right skewed, will not remove outliers as they represent the behaviors of a real world scenario, and our model should be trained enough to handle such scenarios
+
+## CO@2 Emission ##
+# #Calculate IQR for engine_size column
+co2_iqr <- IQR(df$CO2.Emissions.g.km.)
+range_co2<-range(df$CO2.Emissions.g.km.)
+cat("Range for CO2 Emission column:", range_co2, "\n")
+# Print IQR value and range
+cat("Interquartile Range (IQR) for CO2 Emission column:", co2_iqr, "\n")
+# Create boxplot
+ggplot(data = df, aes(y = CO2.Emissions.g.km.)) +
+  geom_boxplot(fill = "lightblue", color = "blue") +
+  xlab("CO2 Emission") +
+  ylab("Distribution)") +
+  ggtitle("Boxplot of CO2 Emission") + 
+  theme_light()
+# Create distribution
+ggplot(data = df, aes(x = CO2.Emissions.g.km.)) +
+  geom_density(color = "blue", fill = "lightblue") +
+  xlab("CO2 Emission") +
+  ylab("Density") +
+  theme_light() +
+  ggtitle("Normal Distribution of CO2 Emission")
+
+
+
+#### Creating Dummy Varaibls ###
+# For our categorical varaibles that do not have an ordinal relationshionship between them, we will create dummy variables 
+
+# Create dummy variables for Transmission
+df$Transmission<-as.factor(df$Transmission)
+transmission_dummies <- model.matrix(~Transmission-1, data=df)
+transmission_dummies <- as.data.frame(transmission_dummies)
+df$Transmission <- NULL
+df <- cbind(df, transmission_dummies)
+
+## Fuel Type ##
+#Create dummy variables for Fuel Type
+df$Fuel.Type<-as.factor(df$Fuel.Type)
+fuel_dummies <- model.matrix(~Fuel.Type-1, data=df)
+fuel_dummies <- as.data.frame(fuel_dummies)
+df$Fuel.Type <- NULL
+df <- cbind(df, fuel_dummies)
+
+#### Correlation ####
+summary(df)
+df_temp<-df[, 3:ncol(df)]
+str(df_temp)
+df_temp$Cylinders<-as.numeric(df_temp$Cylinders)
+df_temp$Gear<-as.numeric(df_temp$Gear)
+df_temp$Smog.Rating <- as.numeric(df_temp$Smog.Rating)
+cor_matrix <- cor(df_temp)
+# Create heatmap
+corrplot(cor_matrix, method = "color", type = "upper", tl.col = "black",
+         tl.srt = 75, tl.cex = 0.5, addCoef.col = "black", number.cex = 0.6,
+         col = colorRampPalette(c("#BB4444", "#EE9988", "#FFFFFF", "#77AADD", "#4477AA"))(200),
+         diag = FALSE)
+
+#### Split data into training and testing ####
+# Define what each variable represents #
+train_idx <- createDataPartition(df$CO2.Emissions.g.km., p = 0.7, list = FALSE)
+# Training 
+train_data <- df[train_idx, ]
+train_make_type<-train_data[,1:2]
+train_make_type<-train_data[,1:2]
+train_data<-train_data[,3:length(train_data)]
+# Testing data
+test_data <- df[-train_idx, ]
+test_make_type<-test_data[,1:2]
+test_data<-test_data[,3:length(test_data)]
+#Save data as csv file
+write.csv(df, file = "post_data_transformation.csv", row.names = FALSE)
+
+### ----------------------------------- ###
+
+#### Step 2: Regression ####
+### P-Value Analysis ### 
+model<-lm(CO2.Emissions.g.km. ~ Engine.Size.L.  + Cylinders + 
+            Fuel.Consumption.Comb..L.100.km.. + Gear + TransmissionA + TransmissionAM +
+            TransmissionAS + TransmissionAV + Fuel.TypeX , data = df)
+anova(model)
+# From this we can observe that gear has no significant impact of our regression variable
+# Also, we remove cylinders becuase to resolve our issue of linearity, and since it has a p-value greater than cylinders and fuel consumption, we remove that
+
+#### Linear Regression ####
+# Perform k-fold cross-validation with 10 iterations
+k <- 10
+cv <- trainControl(method = "cv", number = k)
+model <- train(CO2.Emissions.g.km. ~ Engine.Size.L. +
+                 Fuel.Consumption.Comb..L.100.km.. + TransmissionA + TransmissionAM +
+                 TransmissionAS + TransmissionAV + Fuel.TypeX, data = train_data, method = "lm", trControl = cv)
+# Calculate model performance metrics
+lm_preds <- predict(model, newdata = test_data)
+mae <- mean(abs(lm_preds - test_data$CO2.Emissions.g.km.))
+rmse <- sqrt(mean((lm_preds - test_data$CO2.Emissions.g.km.)^2))
+rsq <- cor(lm_preds, test_data$CO2.Emissions.g.km.)^2
+# Print model performance metrics
+cat("MAE:", mae, "\n")
+cat("RMSE:", rmse, "\n")
+cat("R-squared:", rsq, "\n")
+# Calculate the performance of the model on the training data
+train_preds <- predict(model, newdata = train_data)
+train_mse <- mean((train_preds - train_data$CO2.Emissions.g.km.)^2)
+# Calculate the performance of the model on the test data
+test_preds <- predict(model, newdata = test_data)
+test_mse <- mean((test_preds - test_data$CO2.Emissions.g.km.)^2)
+# Calculate the ratio of test error to training error
+test_train_ratio <- test_mse / train_mse
+print(paste0("Test/train ratio: ", round(test_train_ratio, 2)))
+
+#### SVM ####
+# Perform k-fold cross-validation with 10 iterations
+k <- 10
+cv <- trainControl(method = "cv", number = k)
+model <- train(CO2.Emissions.g.km. ~ Engine.Size.L.  +
+                 Fuel.Consumption.Comb..L.100.km.. + TransmissionA + TransmissionAM +
+                 TransmissionAS + TransmissionAV + Fuel.TypeZ, data = train_data, method = "svmRadial", trControl = cv)
+model$pred
+# Calculate model performance metrics
+lm_preds <- predict(model, newdata = test_data)
+mae <- mean(abs(lm_preds - test_data$CO2.Emissions.g.km.))
+rmse <- sqrt(mean((lm_preds - test_data$CO2.Emissions.g.km.)^2))
+rsq <- cor(lm_preds, y_test$CO2.Emissions.g.km.)^2
+# Print model performance metrics
+cat("MAE:", mae, "\n")
+cat("RMSE:", rmse, "\n")
+cat("R-squared:", rsq, "\n")
+# Calculate the performance of the model on the training data
+train_preds <- predict(model, newdata = train_data)
+train_mse <- mean((train_preds - train_data$CO2.Emissions.g.km.)^2)
+# Calculate the performance of the model on the test data
+test_preds <- predict(model, newdata = test_data)
+test_mse <- mean((test_preds - test_data$CO2.Emissions.g.km.)^2)
+# Calculate the ratio of test error to training error
+test_train_ratio <- test_mse / train_mse
+print(paste0("Test/train ratio: ", round(test_train_ratio, 2)))
+
+
+
+#### GBM ####
+# Perform k-fold cross-validation with 10 iterations
+k <- 10
+cv <- trainControl(method = "cv", number = k)
+model <- train(CO2.Emissions.g.km. ~ 
+                 Fuel.Consumption.Comb..L.100.km.. + TransmissionA + TransmissionAM +
+                 TransmissionAS + TransmissionAV + Fuel.TypeX, data = train_data, method = "gbm", trControl = cv)
+model
+# Calculate model performance metrics
+lm_preds <- predict(model, newdata = test_data)
+mae <- mean(abs(lm_preds - test_data$CO2.Emissions.g.km.))
+rmse <- sqrt(mean((lm_preds - test_data$CO2.Emissions.g.km.)^2))
+rsq <- cor(lm_preds, test_data$CO2.Emissions.g.km.)^2
+# Print model performance metrics
+cat("MAE:", mae, "\n")
+cat("RMSE:", rmse, "\n")
+cat("R-squared:", rsq, "\n")
+# Calculate the performance of the model on the training data
+train_preds <- predict(model, newdata = train_data)
+train_mse <- mean((train_preds - train_data$CO2.Emissions.g.km.)^2)
+# Calculate the performance of the model on the test data
+test_preds <- predict(model, newdata = test_data)
+test_mse <- mean((test_preds - test_data$CO2.Emissions.g.km.)^2)
+# Calculate the ratio of test error to training error
+test_train_ratio <- test_mse / train_mse
+print(paste0("Test/train mse: ", round(test_train_ratio, 2)))
+
+### Linear Regression is  the best ###
+
+### We will now append the results of our linear regression in our testing data for predicting smog rating ###
+# We will also add the results of CO2 Emission in our resulting dataframe # 
+
+#### Final Model ####
+# Perform k-fold cross-validation with 10 iterations
+k <- 10
+cv <- trainControl(method = "cv", number = k)
+model <- train(CO2.Emissions.g.km. ~ Engine.Size.L.  +
+                 Fuel.Consumption.Comb..L.100.km.. + TransmissionA + TransmissionAM +
+                 TransmissionAS + TransmissionAV + Fuel.TypeX, data = train_data, method = "lm", trControl = cv)
+#Compute confidence interval to check the significant variables
+confint(model$finalModel, level = 0.95)
+model$finalModel
+
+# Extract coefficients and estimated covariance matrix
+model_coefs <- coef(model$finalModel)
+model_cov <- vcov(model$finalModel)
+# Calculate confidence intervals for coefficients
+ci <- confint(model)
+
+# Calculate model performance metrics
+lm_preds <- predict(model, newdata = test_data)
+# Add the predicted regression to our final dataframe which we will use to make our final analysis
+test_make_type$CO2.Emission<-lm_preds
+# Also, replace the CO2 emission column in our test data as we will use the predicted regression variables for our final classification
+# Remove the column named "new_column" using subset()
+test_data <- subset(test_data, select = -c(CO2.Emissions.g.km.))
+test_data$CO2.Emissions.g.km.<-lm_preds
+
+
+### ----------------------------------- ###
+
+#### Stage 3: Classification #### 
+df$Smog.Rating<-as.factor(df$Smog.Rating)
+### P-Value Analysis ### 
+model <- multinom(Smog.Rating ~ CO2.Emissions.g.km.  + Cylinders + Gear + TransmissionA + TransmissionAM +
+                    TransmissionAS + TransmissionAV + Fuel.TypeX, data = train_data)
+Anova(model)
+
+#### Logistic Regression ####
+# Perform k-fold cross-validation with 10 iterations
+k <- 10
+cv <- trainControl(method = "cv", number = k)
+model <- train(Smog.Rating ~ CO2.Emissions.g.km.  + Cylinders +  
+                 Fuel.Consumption.Comb..L.100.km.. + Gear + TransmissionA + TransmissionAM +
+                 TransmissionAS + TransmissionAV + Fuel.TypeX, data = train_data, method = "multinom", trControl = cv)
+model <- train(Smog.Rating ~ CO2.Emissions.g.km.  , data = train_data, method = "multinom", trControl = cv)
+
+model
+# Calculate model performance metrics
+class_preds <- predict(model, newdata = test_data, type = "prob")
+# Extract the predicted probabilities for the classes of interest
+class_1_probs <- class_preds[, "1"]
+class_3_probs <- class_preds[, "3"]
+class_5_probs <- class_preds[, "5"]
+class_6_probs <- class_preds[, "6"]
+class_7_probs <- class_preds[, "7"]
+
+# Create the ROC curve for each class and plot them together
+roc_1 <- roc(response = test_data$Smog.Rating == 1, predictor = class_1_probs)
+roc_3 <- roc(response = test_data$Smog.Rating == 3, predictor = class_3_probs)
+roc_5 <- roc(response = test_data$Smog.Rating == 5, predictor = class_5_probs)
+roc_6 <- roc(response = test_data$Smog.Rating == 6, predictor = class_6_probs)
+roc_7 <- roc(response = test_data$Smog.Rating == 7, predictor = class_7_probs)
+
+roc_1
+plot(roc_1, col = "red", auc.polygon = TRUE, legacy.axes = TRUE, grid=c(0.1, 0.5), print.auc.x=0.2, print.auc.y=0.4, xlab="1-Specificity", ylab="Sensitivity", main="ROC Curve")
+plot(roc_3, col = "green", add = TRUE)
+plot(roc_5, col = "blue",  add = TRUE)
+plot(roc_6, col = "orange",  add = TRUE)
+plot(roc_7, col = "purple",  add = TRUE)
+
+legend("bottomright", legend=c("1", "3", "5", "6", "7"), col=c("red", "green", "blue", "orange", "purple"), lwd=2)
+
+# Get predicted labels
+labels <- predict(model, newdata = test_data, type = "raw")
+confusion <- confusionMatrix(labels, test_data$Smog.Rating)
+# Extract relevant metrics from confusion$byClass table
+sensitivity <- confusion$byClass[, "Sensitivity"]
+specificity <- confusion$byClass[, "Specificity"]
+precision <- confusion$byClass[, "Pos Pred Value"]
+recall <- confusion$byClass[, "Recall"]
+neg_pred_value <- confusion$byClass[, "Neg Pred Value"]
+pos_pred_value <- confusion$byClass[, "Pos Pred Value"]
+f1_score <- confusion$byClass[, "F1"]
+accuracy <- confusion$byClass[,'Balanced Accuracy']
+# Create a data frame to store the resulting table
+result_table <- data.frame(
+  Sensitivity = sensitivity,
+  Specificity = specificity,
+  Precision = precision,
+  Recall = recall,
+  Neg_Pred_Value = neg_pred_value,
+  Pos_Pred_Value = pos_pred_value,
+  F1 = f1_score,
+  Accuracy = accuracy)
+result_table
+# Calculate the average for each column
+avg_row <- colMeans(result_table[-1, ])
+# Add the average row to the result table
+result_table <- rbind(result_table, avg_row)
+rownames(result_table)[nrow(result_table)] <- "Average"
+# Print the result table
+print(result_table)
+
+#### Random Forest ####
+# Perform k-fold cross-validation with 10 iterations
+k <- 10
+cv <- trainControl(method = "cv", number = k)
+model <- train(Smog.Rating ~ CO2.Emissions.g.km. + Engine.Size.L. + Cylinders +  
+                 Fuel.Consumption.Comb..L.100.km.. + Gear + TransmissionA + TransmissionAM +
+                 TransmissionAS + TransmissionAV + Fuel.TypeX, data = train_data, method = "rf", trControl = cv)
+# Calculate model performance metrics
+class_preds <- predict(model, newdata = test_data, type = "prob")
+# Extract the predicted probabilities for the classes of interest
+class_1_probs <- class_preds[, "1"]
+class_3_probs <- class_preds[, "3"]
+class_5_probs <- class_preds[, "5"]
+class_6_probs <- class_preds[, "6"]
+class_7_probs <- class_preds[, "7"]
+
+# Create the ROC curve for each class and plot them together
+roc_1 <- roc(response = test_data$Smog.Rating == 1, predictor = class_1_probs)
+roc_1$auc
+roc_3 <- roc(response = test_data$Smog.Rating == 3, predictor = class_3_probs)
+roc_5 <- roc(response = test_data$Smog.Rating == 5, predictor = class_5_probs)
+roc_6 <- roc(response = test_data$Smog.Rating == 6, predictor = class_6_probs)
+roc_7 <- roc(response = test_data$Smog.Rating == 7, predictor = class_7_probs)
+
+plot(roc_1, col = "red", auc.polygon = TRUE, legacy.axes = TRUE, grid=c(0.1, 0.5), print.auc.x=0.2, print.auc.y=0.4, xlab="1-Specificity", ylab="Sensitivity", main="ROC Curve")
+plot(roc_3, col = "green", add = TRUE)
+plot(roc_5, col = "blue", add = TRUE)
+plot(roc_6, col = "orange", add = TRUE)
+plot(roc_7, col = "purple", add = TRUE)
+
+legend("bottomright", legend=c("1", "3", "5", "6", "7"), col=c("red", "green", "blue", "orange", "purple"), lwd=2)
+
+# Get predicted labels
+labels <- predict(model, newdata = test_data, type = "raw")
+confusion <- confusionMatrix(labels, test_data$Smog.Rating)
+# Extract relevant metrics from confusion$byClass table
+sensitivity <- confusion$byClass[, "Sensitivity"]
+specificity <- confusion$byClass[, "Specificity"]
+precision <- confusion$byClass[, "Pos Pred Value"]
+recall <- confusion$byClass[, "Recall"]
+neg_pred_value <- confusion$byClass[, "Neg Pred Value"]
+pos_pred_value <- confusion$byClass[, "Pos Pred Value"]
+f1_score <- confusion$byClass[, "F1"]
+accuracy <- confusion$byClass[,'Balanced Accuracy']
+# Create a data frame to store the resulting table
+result_table <- data.frame(
+  Sensitivity = sensitivity,
+  Specificity = specificity,
+  Precision = precision,
+  Recall = recall,
+  Neg_Pred_Value = neg_pred_value,
+  Pos_Pred_Value = pos_pred_value,
+  F1 = f1_score,
+  Accuracy = accuracy)
+result_table
+# Calculate the average for each column
+avg_row <- colMeans(result_table[-1, ])
+# Add the average row to the result table
+result_table <- rbind(result_table, avg_row)
+rownames(result_table)[nrow(result_table)] <- "Average"
+# Print the result table
+print(result_table)
+
+#### Decision Trees ####
+# Perform k-fold cross-validation with 10 iterations
+k <- 10
+cv <- trainControl(method = "cv", number = k)
+model <- train(Smog.Rating ~ CO2.Emissions.g.km. + Engine.Size.L. + Cylinders +  
+                 Fuel.Consumption.Comb..L.100.km.. + Gear + TransmissionA + TransmissionAM +
+                 TransmissionAS + TransmissionAV + Fuel.TypeX, data = train_data, method = "rpart", trControl = cv)
+# Calculate model performance metrics
+class_preds <- predict(model, newdata = test_data, type = "prob")
+# Extract the predicted probabilities for the classes of interest
+class_1_probs <- class_preds[, "1"]
+class_3_probs <- class_preds[, "3"]
+class_5_probs <- class_preds[, "5"]
+class_6_probs <- class_preds[, "6"]
+class_7_probs <- class_preds[, "7"]
+
+# Create the ROC curve for each class and plot them together
+roc_1 <- roc(response = test_data$Smog.Rating == 1, predictor = class_1_probs)
+roc_1$auc
+roc_3 <- roc(response = test_data$Smog.Rating == 3, predictor = class_3_probs)
+roc_3$auc
+roc_5 <- roc(response = test_data$Smog.Rating == 5, predictor = class_5_probs)
+roc_5$auc
+roc_6 <- roc(response = test_data$Smog.Rating == 6, predictor = class_6_probs)
+roc_6$auc
+roc_7 <- roc(response = test_data$Smog.Rating == 7, predictor = class_7_probs)
+roc_7$auc
+
+plot(roc_1, col = "red",  auc.polygon = TRUE, legacy.axes = TRUE, grid=c(0.1, 0.5), print.auc.x=0.2, print.auc.y=0.4, xlab="1-Specificity", ylab="Sensitivity", main="ROC Curve")
+plot(roc_3, col = "green", add = TRUE)
+plot(roc_5, col = "blue",  add = TRUE)
+plot(roc_6, col = "orange", add = TRUE)
+plot(roc_7, col = "purple", add = TRUE)
+
+legend("bottomright", legend=c("1", "3", "5", "6", "7"), col=c("red", "green", "blue", "orange", "purple"), lwd=2)
+# Get predicted labels
+labels <- predict(model, newdata = test_data, type = "raw")
+confusion <- confusionMatrix(labels, test_data$Smog.Rating)
+# Extract relevant metrics from confusion$byClass table
+sensitivity <- confusion$byClass[, "Sensitivity"]
+specificity <- confusion$byClass[, "Specificity"]
+precision <- confusion$byClass[, "Pos Pred Value"]
+recall <- confusion$byClass[, "Recall"]
+neg_pred_value <- confusion$byClass[, "Neg Pred Value"]
+pos_pred_value <- confusion$byClass[, "Pos Pred Value"]
+f1_score <- confusion$byClass[, "F1"]
+accuracy <- confusion$byClass[,'Balanced Accuracy']
+# Create a data frame to store the resulting table
+result_table <- data.frame(
+  Sensitivity = sensitivity,
+  Specificity = specificity,
+  Precision = precision,
+  Recall = recall,
+  Neg_Pred_Value = neg_pred_value,
+  Pos_Pred_Value = pos_pred_value,
+  F1 = f1_score,
+  Accuracy = accuracy)
+result_table
+# Calculate the average for each column
+avg_row <- colMeans(result_table[-1, ])
+# Add the average row to the result table
+result_table <- rbind(result_table, avg_row)
+rownames(result_table)[nrow(result_table)] <- "Average"
+# Print the result table
+print(result_table)
+
+
+
+# Random Forest and logistic regression gave almost similar results, so we will go with random forest
+#### Final Model ####
+# Perform k-fold cross-validation with 10 iterations
+k <- 10
+cv <- trainControl(method = "cv", number = k)
+model <- train(Smog.Rating ~ CO2.Emissions.g.km. + Engine.Size.L. + Cylinders +  
+                 Fuel.Consumption.Comb..L.100.km.. + Gear + TransmissionA + TransmissionAM +
+                 TransmissionAS + TransmissionAV + Fuel.TypeX, data = train_data, method = "rf", trControl = cv)
+cv_results <- model$resample
+acc <- cv_results$Accuracy
+acc_mean <- mean(acc)
+acc_sd <- sd(acc)
+acc_ci <- t.test(acc, conf.level = 0.95)$conf.int
+acc_ci
+# Calculate model performance metrics
+class_preds <- predict(model, newdata = test_data, type = "raw")
+class_preds<-as.numeric(as.character(class_preds))
+#### Add these labels to our final dataframe ###
+test_make_type$Smog.Rating<-class_preds
+# reset the index
+rownames(test_make_type) <- NULL
+test_make_type <- data.frame(test_make_type)
+
+### ----------------------------------- ###
+
+
+#### Stage 4: Evaluation ####
+# Group the values based on vehicle type and company
+df_summary <- test_make_type %>%
+  group_by(Vehicle.Class, Make) %>%
+  summarise(avg_CO2 = mean(CO2.Emission), avg_Smog = mean(Smog.Rating))
+df_summary$Make <- as.factor(df_summary$Make)
+
+
+#### Performing ONE-WAY Anova testing ####
+model <- aov(avg_CO2 ~ Vehicle.Class + Make, data = df_summary)
+summary(model)
+model <- aov(avg_Smog ~ Vehicle.Class + Make, data = df_summary)
+summary(model)
+### Reject the null hypotheses based on the results ###
+
+
+#### Visualizing our results ####
+# Create grid of plots for each Vehicle.Class
+grid <- lapply(unique(df_summary$Vehicle.Class), function(vehicle_class) {
+  # Subset data for current Vehicle.Class
+  data <- subset(df_summary, Vehicle.Class == vehicle_class)
+  
+  # Create plot for current Vehicle.Class
+  plot <- ggplot(data, aes(x = Make, y = avg_CO2, fill = as.numeric(avg_Smog))) +
+    geom_bar(stat = "identity", position = "dodge") +
+    # scale_fill_brewer(palette = "Spectral") +
+    scale_fill_gradientn(colors = c("#C5000B", "#FFD320", "#579D1C"), na.value = "grey50",
+                         values = scales::rescale(c(0, 0.5, 1), to = c(0, 1))) +
+    facet_wrap(~ Vehicle.Class, ncol = 2, scales = "free") +
+    ggtitle(paste("Vehicle Class: ", vehicle_class)) +
+    labs(x = "Make", y = "avg_CO2", fill = "avg_Smog") +
+    # theme_minimal()+
+    theme(axis.text.x = element_text(size = 7), axis.text.y = element_text(size = 7),
+          axis.title = element_text(size=8), plot.title = element_text(size=10))
+  
+  return(plot)
+})
+# Arrange plots in a grid
+grid.arrange(grobs = grid, nrow = 4, ncol = 3)
+# # Export dataframe as a csv file
+write.csv(df_summary, file = "result.csv", row.names = FALSE)
